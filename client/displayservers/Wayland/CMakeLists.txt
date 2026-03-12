@@ -23,8 +23,21 @@ add_library(displayserver_Wayland STATIC
   state.c
   registry.c
   wayland.c
+  wheel.c
   window.c
 )
+
+if(BUILD_TESTING)
+  add_executable(wayland_wheel_test
+    wheel.c
+    tests/wheel.c
+  )
+  target_include_directories(wayland_wheel_test
+    PRIVATE
+      .
+  )
+  add_test(NAME wayland_wheel COMMAND wayland_wheel_test)
+endif()
 
 add_subdirectory(protocol)
 add_subdirectory(desktops)
