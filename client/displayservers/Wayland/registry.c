@@ -33,7 +33,11 @@ static void registryGlobalHandler(void * data, struct wl_registry * registry,
   if (!strcmp(interface, wl_output_interface.name))
     waylandOutputBind(name, version);
   else if (!strcmp(interface, wl_seat_interface.name) && !wlWm.seat)
-    wlWm.seat = wl_registry_bind(wlWm.registry, name, &wl_seat_interface, 1);
+  {
+    // Bind a modern seat version so wheel discrete/value120 callbacks can be used.
+    wlWm.seat = wl_registry_bind(wlWm.registry, name, &wl_seat_interface,
+      version > 8 ? 8 : version);
+  }
   else if (!strcmp(interface, wl_shm_interface.name))
     wlWm.shm = wl_registry_bind(wlWm.registry, name, &wl_shm_interface, 1);
   else if (!strcmp(interface, wl_compositor_interface.name) && version >= 3)

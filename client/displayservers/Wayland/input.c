@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -36,6 +37,69 @@ const double WL_SCROLL_STEP = 15.0;
 const double WL_HALF_SCROLL_STEP = WL_SCROLL_STEP / 2.0;
 
 // Mouse-handling listeners.
+
+struct WaylandWheelState
+{
+  int32_t discrete;
+  int32_t value120;
+  bool hasPrecise;
+};
+
+static struct WaylandWheelState wheel = {0};
+
+static void sendWheelSteps(int32_t steps)
+{
+  const int button =
+    steps > 0 ?
+      5 /* SPICE_MOUSE_BUTTON_DOWN */ :
+      4 /* SPICE_MOUSE_BUTTON_UP   */;
+
+  while (steps != 0)
+  {
+    app_handleButtonPress(button);
+    app_handleButtonRelease(button);
+    steps += steps > 0 ? -1 : 1;
+  }
+}
+
+static void resetWheelState(void)
+{
+  wlWm.scrollState = 0.0;
+  wheel.discrete   = 0;
+  wheel.value120   = 0;
+  wheel.hasPrecise = false;
+}
+
+static void flushWheelState(void)
+{
+  int32_t steps = 0;
+
+  if (wheel.hasPrecise)
+  {
+    steps = wheel.discrete + wheel.value120 / 120;
+    wheel.value120 %= 120;
+  }
+  else
+  {
+    while (wlWm.scrollState > WL_HALF_SCROLL_STEP)
+    {
+      ++steps;
+      wlWm.scrollState -= WL_SCROLL_STEP;
+    }
+
+    while (wlWm.scrollState < -WL_HALF_SCROLL_STEP)
+    {
+      --steps;
+      wlWm.scrollState += WL_SCROLL_STEP;
+    }
+  }
+
+  wheel.discrete   = 0;
+  wheel.hasPrecise = false;
+
+  if (steps != 0)
+    sendWheelSteps(steps);
+}
 
 static void pointerMotionHandler(void * data, struct wl_pointer * pointer,
     uint32_t serial, wl_fixed_t sxW, wl_fixed_t syW)
@@ -55,6 +119,7 @@ static void pointerEnterHandler(void * data, struct wl_pointer * pointer,
   if (surface != wlWm.surface)
     return;
 
+  resetWheelState();
   wlWm.pointerInSurface = true;
   app_handleEnterEvent(true);
 
@@ -84,6 +149,7 @@ static void pointerLeaveHandler(void * data, struct wl_pointer * pointer,
   if (surface != wlWm.surface)
     return;
 
+  resetWheelState();
   wlWm.pointerInSurface = false;
   app_handleEnterEvent(false);
 }
@@ -95,25 +161,70 @@ static void pointerAxisHandler(void * data, struct wl_pointer * pointer,
     return;
 
   double delta = wl_fixed_to_double(value);
-
   wlWm.scrollState += delta;
-
-  while (wlWm.scrollState > WL_HALF_SCROLL_STEP)
-  {
-    app_handleButtonPress(5 /* SPICE_MOUSE_BUTTON_DOWN */);
-    app_handleButtonRelease(5 /* SPICE_MOUSE_BUTTON_DOWN */);
-    wlWm.scrollState -= WL_SCROLL_STEP;
-  }
-
-  while (wlWm.scrollState < -WL_HALF_SCROLL_STEP)
-  {
-    app_handleButtonPress(4 /* SPICE_MOUSE_BUTTON_UP */);
-    app_handleButtonRelease(4 /* SPICE_MOUSE_BUTTON_UP */);
-    wlWm.scrollState += WL_SCROLL_STEP;
-  }
-
   app_handleWheelMotion(delta / WL_SCROLL_STEP);
+
+#if defined(WL_POINTER_FRAME_SINCE_VERSION)
+  if (wl_pointer_get_version(pointer) < WL_POINTER_FRAME_SINCE_VERSION)
+    flushWheelState();
+#else
+  flushWheelState();
+#endif
 }
+
+static void pointerFrameHandler(void * data, struct wl_pointer * pointer)
+{
+  flushWheelState();
+}
+
+#if defined(WL_POINTER_AXIS_SOURCE_SINCE_VERSION)
+static void pointerAxisSourceHandler(void * data, struct wl_pointer * pointer,
+  uint32_t axisSource)
+{
+  // No special handling needed here.
+}
+#endif
+
+#if defined(WL_POINTER_AXIS_STOP_SINCE_VERSION)
+static void pointerAxisStopHandler(void * data, struct wl_pointer * pointer,
+  uint32_t time, uint32_t axis)
+{
+  if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
+    flushWheelState();
+}
+#endif
+
+#if defined(WL_POINTER_AXIS_DISCRETE_SINCE_VERSION)
+static void pointerAxisDiscreteHandler(void * data, struct wl_pointer * pointer,
+  uint32_t axis, int32_t discrete)
+{
+  if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
+    return;
+
+  wheel.discrete += discrete;
+  wheel.hasPrecise = true;
+}
+#endif
+
+#if defined(WL_POINTER_AXIS_VALUE120_SINCE_VERSION)
+static void pointerAxisValue120Handler(void * data, struct wl_pointer * pointer,
+  uint32_t axis, int32_t value120)
+{
+  if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
+    return;
+
+  wheel.value120 += value120;
+  wheel.hasPrecise = true;
+}
+#endif
+
+#if defined(WL_POINTER_AXIS_RELATIVE_DIRECTION_SINCE_VERSION)
+static void pointerAxisRelativeDirectionHandler(void * data,
+  struct wl_pointer * pointer, uint32_t axis, uint32_t direction)
+{
+  // Direction is already encoded in the reported axis values.
+}
+#endif
 
 static int mapWaylandToSpiceButton(uint32_t button)
 {
@@ -151,6 +262,24 @@ static const struct wl_pointer_listener pointerListener = {
   .motion = pointerMotionHandler,
   .button = pointerButtonHandler,
   .axis = pointerAxisHandler,
+#if defined(WL_POINTER_FRAME_SINCE_VERSION)
+  .frame = pointerFrameHandler,
+#endif
+#if defined(WL_POINTER_AXIS_SOURCE_SINCE_VERSION)
+  .axis_source = pointerAxisSourceHandler,
+#endif
+#if defined(WL_POINTER_AXIS_STOP_SINCE_VERSION)
+  .axis_stop = pointerAxisStopHandler,
+#endif
+#if defined(WL_POINTER_AXIS_DISCRETE_SINCE_VERSION)
+  .axis_discrete = pointerAxisDiscreteHandler,
+#endif
+#if defined(WL_POINTER_AXIS_VALUE120_SINCE_VERSION)
+  .axis_value120 = pointerAxisValue120Handler,
+#endif
+#if defined(WL_POINTER_AXIS_RELATIVE_DIRECTION_SINCE_VERSION)
+  .axis_relative_direction = pointerAxisRelativeDirectionHandler,
+#endif
 };
 
 static void relativePointerMotionHandler(void * data,
@@ -242,6 +371,7 @@ static void keyboardEnterHandler(void * data, struct wl_keyboard * keyboard,
   if (surface != wlWm.surface)
     return;
 
+  resetWheelState();
   wlWm.focusedOnSurface = true;
   app_handleFocusEvent(true);
   wlWm.keyboardEnterSerial = serial;
@@ -257,6 +387,7 @@ static void keyboardLeaveHandler(void * data, struct wl_keyboard * keyboard,
   if (surface != wlWm.surface)
     return;
 
+  resetWheelState();
   wlWm.focusedOnSurface = false;
   waylandCBInvalidate();
   app_handleFocusEvent(false);
@@ -309,12 +440,24 @@ static void keyboardModifiersHandler(void * data,
   );
 }
 
+#if defined(WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
+static void keyboardRepeatInfoHandler(void * data, struct wl_keyboard * keyboard,
+  int32_t rate, int32_t delay)
+{
+  // Looking Glass handles repeat internally; this prevents wl_keyboard v4+
+  // compositors from aborting the client when they emit repeat_info.
+}
+#endif
+
 static const struct wl_keyboard_listener keyboardListener = {
   .keymap = keyboardKeymapHandler,
   .enter = keyboardEnterHandler,
   .leave = keyboardLeaveHandler,
   .key = keyboardKeyHandler,
   .modifiers = keyboardModifiersHandler,
+#if defined(WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
+  .repeat_info = keyboardRepeatInfoHandler,
+#endif
 };
 
 static void waylandCleanUpPointer(void)
